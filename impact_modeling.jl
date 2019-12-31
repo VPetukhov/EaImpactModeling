@@ -7,6 +7,9 @@ using Distributions
 using ProgressMeter
 using Random: shuffle
 using StatsBase
+using VegaLite
+
+import JSON
 
 function summarize_vec(vec::Vector{T} where T <: Real)
     res = DataFrame(quantile(vec, [0.0, 0.25, 0.5, 0.75, 1.0])', [:min, :LQ, :median, :UQ, :max])
@@ -41,13 +44,13 @@ function organization_impact_fraction(n_samples::Int, n_organizations::Int, orga
 
     res = vcat(mapslices(summarize_vec, frac_of_top, dims=1)...)
     names!(res, [Symbol("top_$s") for s in names(res)])
-    
+
     res_total = vcat(mapslices(summarize_vec, frac_of_total, dims=1)...)
     names!(res_total, [Symbol("total_$s") for s in names(res_total)])
-    
+
     res_cum = vcat(mapslices(summarize_vec, cum_frac_of_total, dims=1)...)
     names!(res_cum, [Symbol("cum_total_$s") for s in names(res_cum)])
-    
+
     res = hcat(res, res_total, res_cum)
     res[!, :n_organizations] .= n_organizations
     res[!, :organization_id] .= 1:size(res, 1)
@@ -55,7 +58,7 @@ function organization_impact_fraction(n_samples::Int, n_organizations::Int, orga
     return res
 end
 
-# total_impact_per_company(n_samples::Int, n_applicants::Vector{Int}, n_organizations::Vector{Int}, 
+# total_impact_per_company(n_samples::Int, n_applicants::Vector{Int}, n_organizations::Vector{Int},
 #     applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution) =
 #         vcat(total_impact_per_company.(n_samples, n_applicants, n_organizations, applicant_dist, organization_dist)...)
 
@@ -96,14 +99,14 @@ function arrange_personal_impacts(personal_impacts::Matrix{Float64}; matching::S
     if matching == :exact
         personal_impacts = mapslices(x -> sort(x, rev=true), personal_impacts, dims=2)
     elseif matching == :weighted
-        personal_impacts[:, (n_exact + 1):end] = mapslices(row -> sample(row, FrequencyWeights(row), length(row); replace=false), 
+        personal_impacts[:, (n_exact + 1):end] = mapslices(row -> sample(row, FrequencyWeights(row), length(row); replace=false),
             personal_impacts[:, (n_exact + 1):end], dims=2)
     elseif matching == :random
         personal_impacts[:, (n_exact + 1):end] = mapslices(shuffle, personal_impacts[:, (n_exact + 1):end], dims=2)
     else
         error("Unknown matching type: $matching")
     end
-    
+
     return personal_impacts
 end
 
@@ -115,13 +118,13 @@ function total_impact_per_company(personal_impacts::Matrix{Float64}, company_imp
     return vec(sum(personal_impacts .* company_impacts, dims=2))
 end
 
-function total_impact_per_company(n_samples::Int, n_applicants::Int, n_organizations::Int, 
+function total_impact_per_company(n_samples::Int, n_applicants::Int, n_organizations::Int,
         applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
         personal_fit_dist::Union{UnivariateDistribution, Nothing}=nothing, matching::Symbol=:exact)
     personal_impacts = rand(applicant_dist, (n_samples, n_applicants))
     company_impacts = rand(organization_dist, (n_samples, n_organizations))
 
-    total_impact = personal_fit_dist === nothing ? 
+    total_impact = personal_fit_dist === nothing ?
         total_impact_per_company(personal_impacts, company_impacts; matching=matching) :
         total_impact_per_company(personal_impacts, company_impacts, personal_fit_dist; matching=matching)
 
@@ -131,7 +134,7 @@ function total_impact_per_company(n_samples::Int, n_applicants::Int, n_organizat
     return res
 end
 
-function impact_loss_from_matching(n_samples::Int, n_applicants::Int, n_organizations::Int, 
+function impact_loss_from_matching(n_samples::Int, n_applicants::Int, n_organizations::Int,
         applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
         matching1::Symbol=:exact, matching2::Symbol=:weighted, n_exact::Int=0)
 
@@ -144,29 +147,35 @@ function impact_loss_from_matching(n_samples::Int, n_applicants::Int, n_organiza
     res = summarize_vec((total_impact .- total_impact2) ./ total_impact)
     res[!, :n_applicants] .= n_applicants
     res[!, :n_organizations] .= n_organizations
-    
+
     return res
 end
 
-function wrong_choice_impact_loss(n_samples::Int, n_applicants::Int, n_organizations::Int, 
-        applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
-        real_id::Int, shift::Int)
+function prepare_wrong_choice_info(n_samples::Int, n_applicants::Int, n_organizations::Int,
+    applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution)
     personal_impacts = rand(applicant_dist, (n_samples, n_applicants));
     company_impacts = rand(organization_dist, (n_samples, n_organizations));
 
-    applied_id = real_id + shift
-    @assert applied_id <= min(n_applicants, n_organizations)
-
-    personal_impacts = arrange_personal_impacts(personal_impacts, matching=:exact)[:, 1:applied_id]
-
-    n_min = min(size(personal_impacts, 2), size(company_impacts, 2))
+    n_min = min(n_applicants, n_organizations)
+    personal_impacts = mapslices(x -> sort(x, rev=true), personal_impacts, dims=2)[:, 1:n_min]
     company_impacts = mapslices(x -> sort(x, rev=true), company_impacts, dims=2)[:, 1:n_min];
 
-    original_impacts = personal_impacts[:, real_id] .* company_impacts[:, real_id];
+    return personal_impacts, company_impacts
+end
+
+function wrong_choice_impact_loss(personal_impacts::Matrix{Float64}, company_impacts::Matrix{Float64},
+        shift::Int, real_id::Int)
+    applied_id = real_id + shift
+    personal_impacts = deepcopy(personal_impacts)
+    pers_imp_real = deepcopy(personal_impacts[:, real_id])
+
+    original_impacts = pers_imp_real .* company_impacts[:, real_id];
     original_impacts_total = sum(personal_impacts .* company_impacts, dims=2);
 
-    personal_impacts[:, [real_id, applied_id]] .= personal_impacts[:, [applied_id, real_id]];
-    final_impacts = personal_impacts[:, applied_id] .* company_impacts[:, applied_id];
+    personal_impacts[:, real_id:(applied_id-1)] .= personal_impacts[:, (real_id + 1):applied_id];
+    personal_impacts[:, applied_id] .= pers_imp_real
+
+    final_impacts = pers_imp_real .* company_impacts[:, applied_id];
     final_impacts_total = sum(personal_impacts .* company_impacts, dims=2);
 
     res = summarize_vec(vec((original_impacts_total .- final_impacts_total) ./ original_impacts))
@@ -183,8 +192,29 @@ function wrong_choice_impact_loss(n_samples::Int, n_applicants::Int, n_organizat
     return res
 end
 
-function bin_search_n_apps_per_new_org(n_samples::Int, n_applicants::Int, n_organizations::Int, 
-        applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution; 
+function wrong_choice_impact_loss(n_samples::Int, n_applicants::Int, n_organizations::Int,
+        applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
+        real_ids::Vector{Int}, shifts::Vector{Int})
+    personal_impacts, company_impacts = prepare_wrong_choice_info(n_samples, n_applicants, n_organizations, applicant_dist, organization_dist)
+
+    # @assert (maximum(real_ids) + maximum(shifts)) <= size(personal_impacts, 2)
+    return vcat([wrong_choice_impact_loss(personal_impacts, company_impacts, s, ri)
+            for s in shifts for ri in real_ids if s + ri <= size(personal_impacts, 2)]...)
+end
+
+function wrong_choice_impact_loss_frac(n_samples::Int, n_applicants::Int, n_organizations::Int,
+    applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
+    real_quants::Vector{Float64}, shift_quants::Vector{Float64}, base::Symbol=:min)
+    @assert (maximum(real_quants) <= 1) & (maximum(shift_quants) <= 1) & (minimum(real_quants) >= 0) & (minimum(shift_quants) >= 0)
+    base = (base == :applicants) ? n_applicants : ((base == :organizations) ? n_organizations : min(n_applicants, n_organizations))
+
+    real_ids, shift_ids = [unique(round.(Int, (base - 1) .* v .+ 1)) for v in [real_quants, shift_quants]]
+    return wrong_choice_impact_loss(n_samples, n_applicants, n_organizations, applicant_dist, organization_dist;
+        real_ids=real_ids, shifts=shift_ids)
+end
+
+function bin_search_n_apps_per_new_org(n_samples::Int, n_applicants::Int, n_organizations::Int,
+        applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
         max_iters=100, quartile_frac=0.05)
     n_a_upper = n_applicants
     impact_target = total_impact_per_company(n_samples, n_applicants, n_organizations + 1, applicant_dist, organization_dist);
@@ -223,7 +253,7 @@ function bin_search_n_apps_per_new_org(n_samples::Int, n_applicants::Int, n_orga
     end
 
     n_a_mean -= n_applicants
-    return DataFrame(:n_applicants => n_applicants, :n_organizations => n_organizations, 
+    return DataFrame(:n_applicants => n_applicants, :n_organizations => n_organizations,
         :n_additional_applicants => n_a_mean, :frac_additional_applicants => n_a_mean / n_applicants)
 end
 
@@ -240,5 +270,83 @@ end
 
 rotate_df(df_row::DataFrame; other_cols...) =
     DataFrame(:values => collect(df_row[1,:]), :type => names(df_row), other_cols...)
+
+## Visualization utils
+
+function savehtml(filepath::AbstractString, spec::VegaLite.AbstractVegaSpec)
+    tmp_path = VegaLite.getparams(spec) |> JSON.json |> VegaLite.writehtml_full
+    return cp(tmp_path, filepath, force=true)
+end
+
+function savehtml2(filepath::AbstractString, spec::VegaLite.AbstractVegaSpec)
+    spec_str = VegaLite.getparams(spec) |> JSON.json
+    content = """
+<html>
+  <head>
+    <title>VegaLite plot</title>
+    <meta charset="UTF-8">
+    <script src="https://cdn.jsdelivr.net/npm/vega@5.9.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-lite@4.0.2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6.2.1"></script>
+  </head>
+  <body>
+    <div id="vg_embed"></div>
+  </body>
+
+  <style media="screen">
+    .vega-actions a {
+      margin-right: 10px;
+      font-family: sans-serif;
+      font-size: x-small;
+      font-style: italic;
+    }
+  </style>
+
+  <script type="text/javascript">
+
+    var spec = $spec_str
+    vegaEmbed('#vg_embed', spec);
+
+  </script>
+
+</html>
+    """
+    open(filepath, "w") do f
+        print(f, content)
+    end
+end
+
+function optimize_df(df::DataFrame, quant_vars::Vector{Symbol}, id_vars::Vector{Symbol})
+    df = deepcopy(df[:, vcat(quant_vars, id_vars)])
+    df[:, quant_vars] .= round.(df[:, quant_vars], sigdigits=4)
+    return df
+end
+
+function optimize_df(df::DataFrame, quant_vars::Vector{Pair{Symbol, Symbol}}, id_vars::Vector{Pair{Symbol, Symbol}})
+    quant_vars = Dict(quant_vars)
+    id_vars = Dict(id_vars)
+    df = deepcopy(df[:, vcat(keys(id_vars)..., keys(quant_vars)...)])
+    df[:, collect(keys(quant_vars))] .= round.(df[:, collect(keys(quant_vars))], sigdigits=4)
+    rename!(df, quant_vars..., id_vars...)
+    return df
+end
+
+## Plots
+
+function vl_plot_base(x::Pair{Symbol, String}, y::Pair{Symbol, String}, color::Pair{Symbol, String};
+    extent::Int=40, width::Int=400, height::Int=300)
+    return @vlplot(
+        config={axisY={minExtent=extent, maxExtent=extent}},
+        x={x[1], title=x[2], type="quantitative"},
+        y={y[1], title=y[2], type="quantitative"},
+        color={color[1], scale={scheme = "category20b"}, type="nominal", title=color[2]},
+        opacity = {condition = {selection = "legend", value = 1}, value = 0.1},
+        transform = [{filter = {selection = :Selectors}}],
+        width=width, height=height
+    )
+end
+
+vl_errorbar(y::Symbol=:UQ, y2::Symbol=:LQ) =
+    @vlplot(mark={:errorbar, ticks=true}, y={y, type="quantitative", title=""}, y2={y2})
 
 end
