@@ -31,10 +31,7 @@ IM = ImpactModeling
 ```julia
 MEAN_NORM = get(ENV, "MEAN_NORM", 20)::Real;
 MEAN_LOGNORM = get(ENV, "MEAN_LOGNORM", 1)::Real;
-```
-
-```julia
-MEAN_NORM, MEAN_LOGNORM = 20, 1;
+AGGREGATION = Symbol(get(ENV, "AGGREGATION", :prod));
 ```
 
 ## Total impact model
@@ -58,7 +55,7 @@ c_lock = SpinLock();
 @time @threads for s in total_imp_scales
     for (ma, ad) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
         for (mo, od) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
-            df = vcat([IM.total_impact_per_company(3000, n_a, n_o, ad(ma, s), od(mo, s)) 
+            df = vcat([IM.total_impact_per_company(3000, n_a, n_o, ad(ma, s), od(mo, s), aggregation=AGGREGATION) 
                     for n_a in n_applicants_total for n_o in n_organizations]...);
             df[!, :scale] .= s
             df[!, :app_distribution] .= "$ad"
@@ -75,32 +72,28 @@ total_imp_df = vcat(total_imp_dfs...);
 ```
 
 ```julia
-total_imp_df |>
-    @vlplot(
-        config={axisY={minExtent=60, maxExtent=60}},
-        x={:n_organizations, title="#Organizations"},
-        y={:median, title="Total impact"},
-        color={:n_applicants, scale={scheme = "category20b"}, type="nominal"},
-        transform = [{filter = {selection = :ScaleDist}}],
-        width=700, height=300
-    ) +
-    @vlplot(
-        mark={:line, point=true},
-        selection = {
-            ScaleDist = {
-                type = "single", fields = ["scale", "org_distribution", "app_distribution"],
-                init = {scale = 1.0, org_distribution="LogNormal", app_distribution="LogNormal"},
-                bind = {scale = {input = "range", min=minimum(total_imp_scales), max=maximum(total_imp_scales), step=diff(total_imp_scales)[1], name="Scale"}, 
-                        app_distribution = {input = "select", options=["Normal", "LogNormal"], name="Applicant distribution"},
-                        org_distribution = {input = "select", options=["Normal", "LogNormal"], name="Organization distribution"}}
-            }
-        }
-    ) +
-    @vlplot(
-        mark={:errorbar, ticks=true},
-        y={:UQ, typ="quantitative", title=""},
-        y2={:LQ}
-    )
+p_df = IM.optimize_df(
+    total_imp_df, 
+    [:LQ => :LQ, :UQ => :UQ, :median => :m],
+    [:n_organizations => :no, :n_applicants => :na, :scale => :sc, :app_distribution => :ad, :org_distribution => :od]);
+
+p_df |>
+IM.vl_plot_base(:no => "#Organizations", :m => "Total impact", :na => "#Applicants") +
+@vlplot(
+    mark={:line, point=true},
+    selection = {
+        Selectors = {
+            type = "single", fields = ["sc", "od", "ad"],
+            init = {sc = 1.0, od="LogNormal", ad="LogNormal", ne=0},
+            bind = {sc = {input = "range", min=minimum(total_imp_scales), max=maximum(total_imp_scales), step=diff(total_imp_scales)[1], name="Scale"},
+                    ad = {input = "select", options=["Normal", "LogNormal"], name="Applicant distribution"},
+                    od = {input = "select", options=["Normal", "LogNormal"], name="Organization distribution"}},
+            clear = "false"
+        },
+        legend = {type = "multi", fields = [:na], bind = "legend"}
+    }
+) +
+IM.vl_errorbar()
 ```
 
 Impact increases as more impactful organizations come to the market
@@ -117,10 +110,6 @@ IM = ImpactModeling
 ```
 
 ```julia
-# impact_loss_df_abs = deepcopy(impact_loss_df);
-```
-
-```julia
 impact_loss_scales = range(1, 3.0; step=1);
 impact_loss_dfs = DataFrame[]
 impact_loss_n_orgs = 50:150:350
@@ -133,14 +122,15 @@ c_lock = SpinLock();
         for n_apps in impact_loss_n_applicants
             for (ma, ad) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
                 for (mo, od) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
-#                     df = IM.wrong_choice_impact_loss(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
-#                         real_ids=vcat(1:5, 7, 10, 15, 20, 30), shifts=vcat(1:5, 7, 10, 15, 20));
-#                     df = IM.wrong_choice_impact_loss_frac(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
-#                         real_quants=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.45], shift_quants=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.45]);
-#                     df = IM.wrong_choice_impact_loss_frac(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
-#                         real_quants=range(0.0, 0.5, step=0.05), shift_quants=range(0.0, 1.0, step=0.05));
                     df = IM.wrong_choice_impact_loss(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
-                        real_ids=vcat(1:2:50), shifts=vcat(1:5, 7, 10, 15, 20));
+                        real_ids=vcat(1:5, 7, 10, 15, 20, 30, 50), shifts=vcat(1:5, 7, 10, 15, 20), aggregation=AGGREGATION);
+#                     df = IM.wrong_choice_impact_loss_frac(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
+#                         real_quants=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.45], shift_quants=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.45], 
+#                         aggregation=AGGREGATION);
+#                     df = IM.wrong_choice_impact_loss_frac(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
+#                         real_quants=range(0.0, 0.5, step=0.05), shift_quants=range(0.0, 1.0, step=0.05), aggregation=AGGREGATION);
+#                     df = IM.wrong_choice_impact_loss(1000, n_apps, n_orgs, ad(ma, s), od(mo, s); 
+#                         real_ids=vcat(1:2:50), shifts=vcat(1:5, 7, 10, 15, 20), aggregation=AGGREGATION);
                     df[!, :scale] .= s
                     df[!, :app_distribution] .= "$ad"
                     df[!, :org_distribution] .= "$od"
@@ -158,119 +148,19 @@ c_lock = SpinLock();
 end
 
 impact_loss_df = vcat(impact_loss_dfs...);
+```
 
+```julia
 p_df = IM.optimize_df(
     impact_loss_df, 
     [:personal_LQ => :pl, :personal_median => :pm, :personal_UQ => :pu, 
         :total_LQ => :tl, :total_median => :tm, :total_UQ => :tu],
     [:real_id => :rid, :shift => :sh, :scale => :sc, :app_distribution => :ad, :org_distribution => :od, 
         :n_applicants => :na, :n_organizations => :no]);
-```
 
-```julia
-plt = p_df |> @vlplot(
-    config={axisY={minExtent=30, maxExtent=30}},
-    x={:rid, title="Real applicant rank", type="quantitative", scale = {domain = {selection = "brush"}}},
-    color={:sh, scale={scheme = "category20b"}, type="nominal", name="Shift"},
-    transform = [{filter = {selection = :ScaleDistNs}}],
-    opacity = {condition = {selection = "legend", value = 1}, value = 0.1},
-    width=350, height=300,
-    y={:pm, title="Fraction of personal impact", type="quantitative"},
-    mark={:line, point=true},
-    selection = {
-        ScaleDistNs = {
-            type = "single", fields = ["sc", "od", "ad", "na", "no"],
-            init = {sc = 1.0, od="LogNormal", ad="LogNormal", 
-                    na=impact_loss_n_applicants[1], no=impact_loss_n_orgs[1]},
-            bind = {sc={input="range", min=minimum(impact_loss_scales), max=maximum(impact_loss_scales), step=diff(impact_loss_scales)[1], name="Scale"},
-                    na={input="range", min=minimum(impact_loss_n_applicants), max=maximum(impact_loss_n_applicants), step=diff(impact_loss_n_applicants)[1], name="#Applicants"},
-                    no={input="range", min=minimum(impact_loss_n_orgs), max=maximum(impact_loss_n_orgs), step=diff(impact_loss_n_orgs)[1], name="#Organizations"},
-                    ad = {input = "select", options=["Normal", "LogNormal"], name="Applicant distribution"},
-                    od = {input = "select", options=["Normal", "LogNormal"], name="Organization distribution"}},
-            clear = "false"
-        },
-        legend = {type = "multi", fields = [:rid], bind = "legend"},
-        brush = {type = "interval", encodings = ["x"]}
-    }
-)
-```
-
-```julia
-impact_loss_scales = range(1, 3.0; step=1);
-impact_loss_dfs = DataFrame[]
-org_dists = []
-app_dists = []
-
-n_apps, n_orgs = 50, 50
-c_lock = SpinLock();
-@time @threads for s in impact_loss_scales
-    for (ma, ad) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
-        for (mo, od) in zip([MEAN_NORM, MEAN_LOGNORM], [Normal, LogNormal])
-            a_dist = ad(ma, s)
-            o_dist = od(mo, s)
-            df = IM.wrong_choice_impact_loss(5000, n_apps, n_orgs, a_dist, o_dist; 
-                real_ids=vcat(1:2:50), shifts=vcat(1:5, 7, 10, 15, 20));
-            df[!, :scale] .= s
-            df[!, :app_distribution] .= "$ad"
-            df[!, :org_distribution] .= "$od"
-
-            c_x = range(quantile.(a_dist, [0.05, 0.995])..., length=500);
-            ad_df = DataFrame(:x => c_x, :d => pdf.(a_dist, c_x), :scale => s, :distribution => "$ad")
-            c_x = range(quantile.(o_dist, [0.005, 0.995])..., length=500);
-            od_df = DataFrame(:x => c_x, :d => pdf.(o_dist, c_x), :scale => s, :distribution => "$od")
-
-            lock(c_lock)
-            push!(impact_loss_dfs, t_dfs)
-            push!(org_dists, od_df)
-            push!(app_dists, ad_df)
-            unlock(c_lock)
-        end
-    end
-end
-
-impact_loss_df = vcat(impact_loss_dfs...);
-org_dist_df = vcat(org_dists...)
-app_dist_df = vcat(app_dists...)
-
-p_df = IM.optimize_df(
-    impact_loss_df, 
-    [:personal_LQ => :pl, :personal_median => :pm, :personal_UQ => :pu, 
-        :total_LQ => :tl, :total_median => :tm, :total_UQ => :tu],
-    [:real_id => :rid, :shift => :sh, :scale => :sc, :app_distribution => :ad, :org_distribution => :od]);
-```
-
-```julia
-plt = p_df |> @vlplot(
-    config={axisY={minExtent=30, maxExtent=30}},
-    x={:rid, title="Real applicant rank", type="quantitative"},
-    color={:sh, scale={scheme = "category20b"}, type="nominal", name="Shift"},
-    transform = [{filter = {selection = :ScaleDistNs}}],
-    opacity = {condition = {selection = "legend", value = 1}, value = 0.1},
-    width=350, height=300,
-    y={:pm, title="Fraction of personal impact", type="quantitative"},
-    mark={:line, point=true},
-    selection = {
-        ScaleDistNs = {
-            type = "single", fields = ["sc", "od", "ad"],
-            init = {sc = 1.0, od="LogNormal", ad="LogNormal"},
-            bind = {sc={input="range", min=minimum(impact_loss_scales), max=maximum(impact_loss_scales), step=diff(impact_loss_scales)[1], name="Scale"},
-                    ad = {input = "select", options=["Normal", "LogNormal"], name="Applicant distribution"},
-                    od = {input = "select", options=["Normal", "LogNormal"], name="Organization distribution"}},
-            clear = "false"
-        },
-        legend = {type = "multi", fields = [:rid], bind = "legend"}
-    }
-)
-```
-
-```julia
-rank_impact = median(mapslices(x -> sort(x, rev=true), rand(LogNormal(1, 1), 1000, 50), dims=2), dims=1)
-```
-
-```julia
 vln_base = @vlplot(
     x={:sh, title="Shift", type="quantitative"},
-    color={:rid, scale={scheme = "category20b"}, type="nominal"},
+    color={:rid, scale={scheme = "category20b"}, type="nominal", title="Real id"},
     transform = [{filter = {selection = :ScaleDistNs}}],
     opacity = {condition = {selection = "legend", value = 1}, value = 0.1},
     width=350, height=300
@@ -308,19 +198,44 @@ plt = p_df |> @vlplot(config={axisY={minExtent=30, maxExtent=30}}) + hcat(
         y2={:tl, type="quantitative"}
     )
 );
+                                    
+IM.savehtml("plots/impact_loss.html", plt);
 ```
 
 ```julia
-include("./impact_modeling.jl")
-IM = ImpactModeling
-```
+p_df = IM.optimize_df(
+    impact_loss_df, 
+    [:personal_median => :pm],
+    [:real_id => :rid, :shift => :sh, :scale => :sc, :app_distribution => :ad, :org_distribution => :od, 
+        :n_applicants => :na, :n_organizations => :no]);
 
-```julia
-IM.savehtml2("test_vl3.html", plt);
-```
-
-```julia
-IM.savehtml("test_vl2.html", plt);
+plt = p_df |> @vlplot(
+    config={axisY={minExtent=30, maxExtent=30}},
+    x={:rid, title="Real applicant rank", type="quantitative", scale = {domain = {selection = "brush"}}},
+    y={:pm, title="Fraction of personal impact", type="quantitative"},
+    color={:sh, title="Shift", scale={scheme = "category20b"}, type="nominal"},
+    transform = [{filter = {selection = :ScaleDistNs}}],
+    opacity = {condition = {selection = "legend", value = 1}, value = 0.1},
+    width=350, height=300,
+    mark={:line, point=true},
+    selection = {
+        ScaleDistNs = {
+            type = "single", fields = ["sc", "od", "ad", "na", "no"],
+            init = {sc = 1.0, od="LogNormal", ad="LogNormal", 
+                    na=impact_loss_n_applicants[1], no=impact_loss_n_orgs[1]},
+            bind = {sc={input="range", min=minimum(impact_loss_scales), max=maximum(impact_loss_scales), step=diff(impact_loss_scales)[1], name="Scale"},
+                    na={input="range", min=minimum(impact_loss_n_applicants), max=maximum(impact_loss_n_applicants), step=diff(impact_loss_n_applicants)[1], name="#Applicants"},
+                    no={input="range", min=minimum(impact_loss_n_orgs), max=maximum(impact_loss_n_orgs), step=diff(impact_loss_n_orgs)[1], name="#Organizations"},
+                    ad = {input = "select", options=["Normal", "LogNormal"], name="Applicant distribution"},
+                    od = {input = "select", options=["Normal", "LogNormal"], name="Organization distribution"}},
+            clear = "false"
+        },
+        legend = {type = "multi", fields = [:rid], bind = "legend"},
+        brush = {type = "interval", encodings = ["x"]}
+    }
+);
+                        
+IM.savehtml("plots/impact_loss_personal.html", plt);
 ```
 
 Conclusions:

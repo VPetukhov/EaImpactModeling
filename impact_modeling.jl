@@ -62,8 +62,18 @@ end
 #     applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution) =
 #         vcat(total_impact_per_company.(n_samples, n_applicants, n_organizations, applicant_dist, organization_dist)...)
 
+function aggregate_impact(applicant_impact::Union{Matrix{T}, Vector{T}, T}, company_impact::Union{Matrix{T}, Vector{T}, T}; method::Symbol=:prod) where T <: Real
+    if method == :prod
+        return applicant_impact .* company_impact
+    elseif method == :geometric
+        return sqrt.(applicant_impact .* company_impact)
+    else
+        error("Unknown method: $method")
+    end
+end
+
 function total_impact_per_company(personal_impacts::Matrix{Float64}, company_impacts::Matrix{Float64},
-        personal_fit_dist::UnivariateDistribution; matching::Symbol=:exact)
+        personal_fit_dist::UnivariateDistribution; matching::Symbol=:exact, aggregation::Symbol=:prod)
     n_applicants = size(personal_impacts, 2)
     total_impacts = zeros(size(personal_impacts, 1))
     company_impacts = mapslices(x -> sort(x, rev=true), company_impacts, dims=2)
@@ -82,7 +92,7 @@ function total_impact_per_company(personal_impacts::Matrix{Float64}, company_imp
                 error("Unknown matching type: $matching")
             end
 
-            total_impacts[si] += pers_impacts_adj[ai, 1] * company_impacts[si, ci]
+            total_impacts[si] += aggregate_impact(pers_impacts_adj[ai, 1], company_impacts[si, ci], method=aggregation)
             pers_impacts_adj = pers_impacts_adj[:, 2:end]
             pers_impacts_adj[ai, :] .= 0
         end
@@ -111,22 +121,22 @@ function arrange_personal_impacts(personal_impacts::Matrix{Float64}; matching::S
 end
 
 function total_impact_per_company(personal_impacts::Matrix{Float64}, company_impacts::Matrix{Float64};
-        matching::Symbol=:exact, n_exact::Int=0)
+        matching::Symbol=:exact, n_exact::Int=0, aggregation::Symbol=:prod)
     n_min = min(size(personal_impacts, 2), size(company_impacts, 2))
     company_impacts = mapslices(x -> sort(x, rev=true), company_impacts, dims=2)[:, 1:n_min]
     personal_impacts = arrange_personal_impacts(personal_impacts, matching=matching, n_exact=n_exact)[:, 1:n_min]
-    return vec(sum(personal_impacts .* company_impacts, dims=2))
+    return sum(aggregate_impact(personal_impacts, company_impacts, method=aggregation), dims=2) |> vec
 end
 
 function total_impact_per_company(n_samples::Int, n_applicants::Int, n_organizations::Int,
         applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
-        personal_fit_dist::Union{UnivariateDistribution, Nothing}=nothing, matching::Symbol=:exact)
+        personal_fit_dist::Union{UnivariateDistribution, Nothing}=nothing, matching::Symbol=:exact, aggregation::Symbol=:prod)
     personal_impacts = rand(applicant_dist, (n_samples, n_applicants))
     company_impacts = rand(organization_dist, (n_samples, n_organizations))
 
     total_impact = personal_fit_dist === nothing ?
-        total_impact_per_company(personal_impacts, company_impacts; matching=matching) :
-        total_impact_per_company(personal_impacts, company_impacts, personal_fit_dist; matching=matching)
+        total_impact_per_company(personal_impacts, company_impacts; matching=matching, aggregation=aggregation) :
+        total_impact_per_company(personal_impacts, company_impacts, personal_fit_dist; matching=matching, aggregation=aggregation)
 
     res = summarize_vec(total_impact)
     res[!, :n_applicants] .= n_applicants
@@ -136,13 +146,13 @@ end
 
 function impact_loss_from_matching(n_samples::Int, n_applicants::Int, n_organizations::Int,
         applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
-        matching1::Symbol=:exact, matching2::Symbol=:weighted, n_exact::Int=0)
+        matching1::Symbol=:exact, matching2::Symbol=:weighted, n_exact::Int=0, aggregation::Symbol=:prod)
 
     personal_impacts = rand(applicant_dist, (n_samples, n_applicants))
     company_impacts = rand(organization_dist, (n_samples, n_organizations))
 
-    total_impact = total_impact_per_company(personal_impacts, company_impacts; matching=matching1, n_exact=n_exact)
-    total_impact2 = total_impact_per_company(personal_impacts, company_impacts; matching=matching2, n_exact=n_exact)
+    total_impact = total_impact_per_company(personal_impacts, company_impacts; matching=matching1, n_exact=n_exact, aggregation=aggregation)
+    total_impact2 = total_impact_per_company(personal_impacts, company_impacts; matching=matching2, n_exact=n_exact, aggregation=aggregation)
 
     res = summarize_vec((total_impact .- total_impact2) ./ total_impact)
     res[!, :n_applicants] .= n_applicants
@@ -164,7 +174,7 @@ function prepare_wrong_choice_info(n_samples::Int, n_applicants::Int, n_organiza
 end
 
 function wrong_choice_impact_loss(personal_impacts::Matrix{Float64}, company_impacts::Matrix{Float64},
-        shift::Int, real_id::Int)
+        shift::Int, real_id::Int; aggregation::Symbol=:prod)
     applied_id = real_id + shift
     personal_impacts = deepcopy(personal_impacts)
     pers_imp_real = deepcopy(personal_impacts[:, real_id])
@@ -175,14 +185,14 @@ function wrong_choice_impact_loss(personal_impacts::Matrix{Float64}, company_imp
     personal_impacts[:, real_id:(applied_id-1)] .= personal_impacts[:, (real_id + 1):applied_id];
     personal_impacts[:, applied_id] .= pers_imp_real
 
-    final_impacts = pers_imp_real .* company_impacts[:, applied_id];
-    final_impacts_total = sum(personal_impacts .* company_impacts, dims=2);
+    final_impacts = aggregate_impact(pers_imp_real, company_impacts[:, applied_id], method=aggregation);
+    final_impacts_total = sum(aggregate_impact(personal_impacts, company_impacts, method=aggregation), dims=2);
 
     res = summarize_vec(vec((original_impacts_total .- final_impacts_total) ./ original_impacts))
-    names!(res, [Symbol("personal_$s") for s in names(res)])
+    rename!(res, [Symbol("personal_$s") for s in names(res)])
 
     res_total = summarize_vec(vec((original_impacts_total .- final_impacts_total) ./ original_impacts_total))
-    names!(res_total, [Symbol("total_$s") for s in names(res_total)])
+    rename!(res_total, [Symbol("total_$s") for s in names(res_total)])
 
     res = hcat(res, res_total)
 
@@ -194,11 +204,11 @@ end
 
 function wrong_choice_impact_loss(n_samples::Int, n_applicants::Int, n_organizations::Int,
         applicant_dist::UnivariateDistribution, organization_dist::UnivariateDistribution;
-        real_ids::Vector{Int}, shifts::Vector{Int})
+        real_ids::Vector{Int}, shifts::Vector{Int}, aggregation::Symbol=:prod)
     personal_impacts, company_impacts = prepare_wrong_choice_info(n_samples, n_applicants, n_organizations, applicant_dist, organization_dist)
 
     # @assert (maximum(real_ids) + maximum(shifts)) <= size(personal_impacts, 2)
-    return vcat([wrong_choice_impact_loss(personal_impacts, company_impacts, s, ri)
+    return vcat([wrong_choice_impact_loss(personal_impacts, company_impacts, s, ri, aggregation=aggregation)
             for s in shifts for ri in real_ids if s + ri <= size(personal_impacts, 2)]...)
 end
 
@@ -274,7 +284,7 @@ rotate_df(df_row::DataFrame; other_cols...) =
 ## Visualization utils
 
 function savehtml(filepath::AbstractString, spec::VegaLite.AbstractVegaSpec)
-    tmp_path = VegaLite.getparams(spec) |> JSON.json |> VegaLite.writehtml_full
+    tmp_path = VegaLite.writehtml_full(spec)
     return cp(tmp_path, filepath, force=true)
 end
 
