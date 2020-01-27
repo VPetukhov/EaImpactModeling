@@ -50,7 +50,10 @@ Other parameters:
 - [ ] Convert "distribution_properties" plots to VegaLite
 - [ ] Update "organization_impacts" plots to use IM wrappers 
 - [ ] Add geometric mean parameter to "impact_estimation" functions
+    - Need to deal with MEAN_NORM and MEAN_LOG somehow
+    - **Next steps:** add it to "More complex modifications" section
 - [ ] Copy outline from "Optimal allocation ... .docx" here
+- [ ] Add the next action from this list to Wrike
 
 ```python
 
